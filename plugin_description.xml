@@ -1,0 +1,10 @@
+<library path="lib/libvis_range_image">
+    <class name="rviz/RangeImage"
+           type="rviz::RangeImageDisplay"
+           base_class_type="rviz::Display">
+        <description>
+            Visualizes a PointCloud2 as a range image.
+        </description>
+        <message_type>sensor_msgs/PointCloud2</message_type>
+    </class>
+</library>
