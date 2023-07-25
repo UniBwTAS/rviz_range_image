@@ -32,16 +32,18 @@
 #include <map>
 
 #include <OGRE/OgreTextureManager.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
+#include <boost/optional.hpp>
 
 #include "range_image_texture.h"
 
 namespace rviz
 {
-RangeImageTexture::RangeImageTexture() : new_pc_(false)
+RangeImageTexture::RangeImageTexture()
 {
     empty_image_.load("no_image.png", Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME);
-    width_ = empty_image_.getWidth();
-    height_ = empty_image_.getHeight();
+    width_ = static_cast<int32_t>(empty_image_.getWidth());
+    height_ = static_cast<int32_t>(empty_image_.getHeight());
 
     static uint32_t count = 0;
     std::stringstream ss;
@@ -50,67 +52,54 @@ RangeImageTexture::RangeImageTexture() : new_pc_(false)
         ss.str(), Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME, empty_image_, Ogre::TEX_TYPE_2D, 0);
 }
 
-RangeImageTexture::~RangeImageTexture()
-{
-    current_pc_.reset();
-}
-
 void RangeImageTexture::clear()
 {
     texture_->unload();
     texture_->loadImage(empty_image_);
-    width_ = empty_image_.getWidth();
-    height_ = empty_image_.getHeight();
-
-    new_pc_ = false;
-    current_pc_.reset();
+    width_ = static_cast<int32_t>(empty_image_.getWidth());
+    height_ = static_cast<int32_t>(empty_image_.getHeight());
 }
 
-bool RangeImageTexture::update()
+void RangeImageTexture::generateNewImage(const sensor_msgs::PointCloud2ConstPtr& msg,
+                                         const CloudPoints& colorized_points)
 {
-    if (!current_pc_ || !new_pc_)
+    if (colorized_points.empty())
+        return;
+
+    width_ = msg->width;
+    height_ = msg->height;
+    data_.resize(width_ * height_ * 3);
+
+    // check if we can mark NaN points
+    boost::optional<sensor_msgs::PointCloud2ConstIterator<float>> iter_x;
+    if (enable_separate_color_for_nan_points_)
     {
-        return false;
+        try
+        {
+            iter_x = sensor_msgs::PointCloud2ConstIterator<float>(*msg, "x");
+        }
+        catch (const std::runtime_error& e)
+        {
+            ROS_ERROR_STREAM_THROTTLE(3, "Unable to mark NaN points because points do not have 'x' field.");
+        }
     }
 
-    new_pc_ = false;
-
-    if (current_pc_->empty() || width_ == 0 || height_ == 0)
-    {
-        return false;
-    }
-
-    data_.resize(input_width_ * input_height_ * 3);
+    // iterate over cloud infos and insert pixels to range image
     uint32_t data_idx = 0;
-    if(!flipped_)
+    for (uint32_t i = 0; i < msg->width * msg->height; i++)
     {
-        width_ = input_width_;
-        height_ = input_height_;
-        for (const auto& point : *current_pc_)
-        {
-            data_[data_idx++] = static_cast<uint8_t>(point.color.b * 255);
-            data_[data_idx++] = static_cast<uint8_t>(point.color.g * 255);
-            data_[data_idx++] = static_cast<uint8_t>(point.color.r * 255);
-        }
-    } else {
-        width_ = input_height_;
-        height_ = input_width_;
-        for (uint32_t row_idx = 0; row_idx < height_; row_idx++)
-        {
-            for (uint32_t column_idx = 0; column_idx < width_; column_idx++)
-            {
-                data_idx = (row_idx * width_ + column_idx) * 3;
-                const PointCloud::Point& point = (*current_pc_)[column_idx * height_ + (height_ - 1 - row_idx)];
-                data_[data_idx++] = static_cast<uint8_t>(point.color.b * 255);
-                data_[data_idx++] = static_cast<uint8_t>(point.color.g * 255);
-                data_[data_idx++] = static_cast<uint8_t>(point.color.r * 255);
-            }
-        }
+        bool pos_is_nan = enable_separate_color_for_nan_points_ && iter_x && std::isnan(**iter_x);
+        const Ogre::ColourValue c = pos_is_nan ? color_for_nan_points_ : colorized_points[i].color;
+        data_[data_idx++] = static_cast<uint8_t>(c.b * 255);
+        data_[data_idx++] = static_cast<uint8_t>(c.g * 255);
+        data_[data_idx++] = static_cast<uint8_t>(c.r * 255);
+        if (iter_x)
+            ++(*iter_x);
     }
 
+    // create ogre image
     Ogre::PixelFormat format = Ogre::PF_R8G8B8;
     Ogre::Image ogre_image;
-
     try
     {
         ogre_image.loadDynamicImage(data_.data(), width_, height_, 1, format);
@@ -118,27 +107,10 @@ bool RangeImageTexture::update()
     catch (Ogre::Exception& e)
     {
         ROS_ERROR("Error loading image: %s", e.what());
-        return false;
+        return;
     }
-
     texture_->unload();
     texture_->loadImage(ogre_image);
-
-    return true;
-}
-
-void RangeImageTexture::addPoints(uint32_t width, uint32_t height, const CloudPointsConstPtr& points)
-{
-    current_pc_ = points;
-    input_width_ = width;
-    input_height_ = height;
-    new_pc_ = true;
-}
-
-void RangeImageTexture::flipped(bool flip)
-{
-    flipped_ = flip;
-    new_pc_ = true;
 }
 
 } // end of namespace rviz

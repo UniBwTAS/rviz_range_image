@@ -57,12 +57,8 @@ class RangeImageTexture
 
   public:
     RangeImageTexture();
-    ~RangeImageTexture();
-
-    void addPoints(uint32_t width, uint32_t height, const CloudPointsConstPtr& points);
-    bool update();
+    void generateNewImage(const sensor_msgs::PointCloud2ConstPtr& msg, const CloudPoints& colorized_points);
     void clear();
-    void flipped(bool flip);
 
     const Ogre::TexturePtr& getTexture()
     {
@@ -73,25 +69,29 @@ class RangeImageTexture
     {
         return width_;
     }
+
     uint32_t getHeight() const
     {
         return height_;
     }
 
+    void setColorForNanPoints(bool enable, Ogre::ColourValue c)
+    {
+        enable_separate_color_for_nan_points_ = enable;
+        color_for_nan_points_ = c;
+    }
+
   private:
-    CloudPointsConstPtr current_pc_;
-    bool new_pc_;
     std::vector<uint8_t> data_;
 
     Ogre::TexturePtr texture_;
     Ogre::Image empty_image_;
 
-    uint32_t input_width_;
-    uint32_t input_height_;
     uint32_t width_;
     uint32_t height_;
 
-    bool flipped_;
+    bool enable_separate_color_for_nan_points_{};
+    Ogre::ColourValue color_for_nan_points_;
 };
 
 } // namespace rviz

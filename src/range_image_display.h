@@ -40,6 +40,7 @@
 #include <rviz/default_plugin/point_cloud_transformer.h>
 #include <rviz/display.h>
 #include <rviz/properties/bool_property.h>
+#include <rviz/properties/color_property.h>
 #include <rviz/properties/enum_property.h>
 #include <rviz/properties/float_property.h>
 #include <rviz/properties/int_property.h>
@@ -91,6 +92,7 @@ class RangeImageDisplay : public Display
     void causeRetransform();
     void updateColorTransformer();
     void setColorTransformerOptions(EnumProperty* prop);
+    void resetForFlip();
 
   protected:
     void onInitialize() override;
@@ -122,7 +124,7 @@ class RangeImageDisplay : public Display
     static void setPropertiesHidden(const QList<Property*>& props, bool hide);
     PointCloudTransformerPtr getColorTransformer(const sensor_msgs::PointCloud2ConstPtr& cloud);
     void fillTransformerOptions(EnumProperty* prop, uint32_t mask);
-    void colorizeCloudAndAddToTexture();
+    void transformClouds();
 
   protected:
     Ogre::SceneManager* img_scene_manager_{};
@@ -136,7 +138,8 @@ class RangeImageDisplay : public Display
     bool new_color_transformer_{false};
 
     ros::Subscriber sub_;
-    sensor_msgs::PointCloud2ConstPtr last_msg_;
+    std::list<sensor_msgs::PointCloud2::Ptr> existing_columns_;
+    bool new_message_available{false};
 
     Ogre::SceneNode* img_scene_node_{};
     Ogre::Rectangle2D* screen_rect_{};
@@ -147,7 +150,12 @@ class RangeImageDisplay : public Display
     RosTopicProperty* topic_property_;
     EnumProperty* color_transformer_property_;
     BoolProperty* flip_property_;
+    BoolProperty* upside_down_property_;
     BoolProperty* keep_aspect_ratio_property_;
+    BoolProperty* mark_nan_pixels_property_;
+    ColorProperty* nan_color_property_;
+    BoolProperty* enable_streaming_property_;
+    IntProperty* streaming_max_columns_property_;
 };
 
 } // namespace rviz

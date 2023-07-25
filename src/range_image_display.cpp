@@ -8,12 +8,12 @@
 #include <boost/bind.hpp>
 
 #include <rviz/default_plugin/point_cloud_transformer.h>
-#include <rviz/default_plugin/point_cloud_transformers.h>
 #include <rviz/display_context.h>
 #include <rviz/frame_manager.h>
 #include <rviz/ogre_helpers/compatibility.h>
 #include <rviz/render_panel.h>
 #include <rviz/validate_floats.h>
+#include <sensor_msgs/point_cloud2_iterator.h>
 
 #include "range_image_display.h"
 
@@ -40,12 +40,10 @@ RangeImageDisplay::RangeImageDisplay() : Display(), texture_()
             this,
             SLOT(setColorTransformerOptions(EnumProperty*)));
 
-    flip_property_ = new BoolProperty("Flip",
-                                      false,
-                                      "Flips width and height (rotate 90° degrees counterclockwise).",
-                                      this,
-                                      SLOT(causeRetransform()),
-                                      this);
+    flip_property_ = new BoolProperty("Flip", false, "Flips width and height.", this, SLOT(resetForFlip()), this);
+
+    upside_down_property_ =
+        new BoolProperty("Upside Down", false, "Show range image upside down.", this, SLOT(resetForFlip()), this);
 
     keep_aspect_ratio_property_ = new BoolProperty("Keep Aspect Ratio",
                                                    true,
@@ -53,6 +51,37 @@ RangeImageDisplay::RangeImageDisplay() : Display(), texture_()
                                                    this,
                                                    SLOT(causeRetransform()),
                                                    this);
+
+    mark_nan_pixels_property_ = new BoolProperty("Mark NaN Pixels",
+                                                 false,
+                                                 "Whether to mark NaN pixels with a specific color.",
+                                                 this,
+                                                 SLOT(causeRetransform()),
+                                                 this);
+
+    nan_color_property_ = new ColorProperty("NaN Pixel Color",
+                                            Qt::red,
+                                            "The color of NaN pixels.",
+                                            mark_nan_pixels_property_,
+                                            SLOT(causeRetransform()),
+                                            this);
+
+    enable_streaming_property_ =
+        new BoolProperty("Enable streaming",
+                         false,
+                         "Whether multiple sub-range images (messages) should be accumulated horizontally to display a "
+                         "range image. Please choose a criterion for removing old sub-range images.",
+                         this,
+                         SLOT(causeRetransform()),
+                         this);
+
+    streaming_max_columns_property_ =
+        new IntProperty("Maximum Columns",
+                        0,
+                        "Maximum accumulated number of column of all messages. Zero means disabled.",
+                        enable_streaming_property_,
+                        SLOT(causeRetransform()),
+                        this);
 }
 
 RangeImageDisplay::~RangeImageDisplay()
@@ -149,6 +178,7 @@ void RangeImageDisplay::reset()
     setStatus(StatusProperty::Warn, "Point Cloud", "No point cloud received");
 
     texture_.clear();
+    existing_columns_.clear();
     render_panel_->getCamera()->setPosition(Ogre::Vector3(999999, 999999, 999999));
 }
 
@@ -165,7 +195,8 @@ void RangeImageDisplay::subscribe()
 
         if (!topic_property_->getTopicStd().empty())
         {
-            sub_ = update_nh_.subscribe(topic_property_->getTopicStd(), 5, &RangeImageDisplay::incomingMessage, this);
+            sub_ =
+                update_nh_.subscribe(topic_property_->getTopicStd(), 10000, &RangeImageDisplay::incomingMessage, this);
         }
         setStatus(StatusProperty::Ok, "Topic", "OK");
     }
@@ -206,13 +237,15 @@ void RangeImageDisplay::update(float wall_dt, float ros_dt)
     Q_UNUSED(wall_dt)
     Q_UNUSED(ros_dt)
 
-    if (needs_retransform_)
+    // remove old columns
+    if (enable_streaming_property_->getBool())
     {
-        colorizeCloudAndAddToTexture();
-        needs_retransform_ = false;
+        auto it = existing_columns_.begin();
+        while (existing_columns_.size() > streaming_max_columns_property_->getInt())
+            it = existing_columns_.erase(it);
     }
 
-    texture_.update();
+    transformClouds();
 
     // make sure the aspect ratio of the image is preserved
     auto win_width = static_cast<float>(render_panel_->width());
@@ -266,9 +299,71 @@ void RangeImageDisplay::update(float wall_dt, float ros_dt)
 
 void RangeImageDisplay::processMessage(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
-    last_msg_ = msg;
-    updateTransformers(msg);
-    colorizeCloudAndAddToTexture();
+    if (!enable_streaming_property_->getBool())
+        existing_columns_.clear();
+
+    // check if point cloud is valid otherwise ignore it
+    if (msg->width == 0 || msg->height == 0 || msg->data.size() != msg->width * msg->height * msg->point_step)
+    {
+        ROS_ERROR("Error in Range Image Visualization: Invalid Message");
+        return;
+    }
+
+    // do not update color transformers too frequently
+    if (existing_columns_.empty())
+        updateTransformers(msg);
+
+    // split this message into multiple column msgs in order to keep the pipeline afterwards simple
+    // get variables required for rotations
+    bool not_flipped = !flip_property_->getBool();
+    bool not_upside_down = !upside_down_property_->getBool();
+    uint32_t width, height, stride_in_src;
+    if (not_flipped)
+    {
+        width = msg->width;
+        height = msg->height;
+        stride_in_src = msg->row_step;
+    }
+    else
+    {
+        width = msg->height;
+        height = msg->width;
+        stride_in_src = msg->point_step;
+    }
+    auto stride_in_dst = static_cast<int32_t>(not_upside_down ? msg->point_step : -msg->point_step);
+    // check if height of new columns fits to height of existing range image
+    if (!existing_columns_.empty() && existing_columns_.back()->height != height)
+    {
+        ROS_ERROR("Error in Range Image Visualization: Height of new message does not match existing range image. "
+                  "Maybe you have to uncheck 'Streaming' or toggle 'Flip' option.");
+        return;
+    }
+    for (int column_index = 0; column_index < width; column_index++)
+    {
+        sensor_msgs::PointCloud2::Ptr column_msg(new sensor_msgs::PointCloud2());
+        column_msg->header = msg->header; // TODO: stamp?
+        column_msg->height = height;
+        column_msg->width = 1;
+        column_msg->fields = msg->fields;
+        column_msg->is_bigendian = msg->is_bigendian;
+        column_msg->point_step = msg->point_step;
+        column_msg->row_step = msg->point_step;
+        column_msg->is_dense = msg->is_dense;
+
+        column_msg->data.resize(height * msg->point_step);
+        uint32_t byte_position_src;
+        byte_position_src =
+            not_flipped ? column_index* msg->point_step : byte_position_src = column_index * height * msg->point_step;
+        uint32_t byte_position_dst = not_upside_down ? 0 : msg->point_step * (height - 1);
+        for (int row_index = 0; row_index < height; row_index++)
+        {
+            memcpy(column_msg->data.data() + byte_position_dst, msg->data.data() + byte_position_src, msg->point_step);
+            byte_position_src += stride_in_src;
+            byte_position_dst += stride_in_dst;
+        }
+        existing_columns_.push_back(column_msg);
+        new_message_available = true;
+    }
 }
 
 void RangeImageDisplay::loadTransformers()
@@ -400,29 +495,58 @@ void RangeImageDisplay::fillTransformerOptions(EnumProperty* prop, uint32_t mask
 {
     prop->clearOptions();
 
-    if (!last_msg_)
-    {
+    if (existing_columns_.empty())
         return;
-    }
 
     auto it = transformers_.begin();
     for (; it != transformers_.end(); ++it)
     {
         const PointCloudTransformerPtr& trans = it->second.transformer;
-        if ((trans->supports(last_msg_) & mask) == mask)
+        if ((trans->supports(existing_columns_.back()) & mask) == mask)
         {
             prop->addOption(QString::fromStdString(it->first));
         }
     }
 }
 
-void RangeImageDisplay::colorizeCloudAndAddToTexture()
+void RangeImageDisplay::transformClouds()
 {
-    if(!last_msg_)
+    if (existing_columns_.empty())
         return;
 
-    PointCloudTransformerPtr color_trans = getColorTransformer(last_msg_);
+    if (!needs_retransform_ && !new_message_available)
+        return;
+    needs_retransform_ = false;
+    new_message_available = false;
 
+    // create single message based on columns (important e.g. for min/max of intensity color transformer)
+    auto& first_column = existing_columns_.front();
+    sensor_msgs::PointCloud2Ptr msg(new sensor_msgs::PointCloud2);
+    msg->header = first_column->header;
+    msg->height = first_column->height;
+    msg->width = existing_columns_.size();
+    msg->fields = first_column->fields;
+    msg->is_bigendian = first_column->is_bigendian;
+    msg->point_step = first_column->point_step;
+    msg->row_step = first_column->point_step * msg->width;
+    msg->is_dense = first_column->is_dense;
+    msg->data.resize(msg->width * msg->height * msg->point_step);
+    auto column_it = existing_columns_.begin();
+    for (int column_index = 0; column_index < msg->width; column_index++)
+    {
+        uint8_t* byte_index_dst = msg->data.data() + (column_index * msg->point_step);
+        uint8_t* byte_index_src = (*column_it)->data.data();
+        for (int row_index = 0; row_index < msg->height; row_index++)
+        {
+            memcpy(byte_index_dst, byte_index_src, msg->point_step);
+            byte_index_dst += msg->row_step;
+            byte_index_src += msg->point_step;
+        }
+        column_it++;
+    }
+
+    // get the appropriate color transformer for these clouds (we assume all clouds have the same type)
+    PointCloudTransformerPtr color_trans = getColorTransformer(existing_columns_.front());
     if (!color_trans)
     {
         std::stringstream ss;
@@ -431,19 +555,26 @@ void RangeImageDisplay::colorizeCloudAndAddToTexture()
         return;
     }
 
-    Ogre::Matrix4 transform;
-    transform.makeTransform(Ogre::Vector3(0, 0, 0), Ogre::Vector3(1, 1, 1), Ogre::Quaternion(1, 0, 0, 0)); // TODO
+    // dummy tf required below
+    Ogre::Matrix4 tf;
+    tf.makeTransform(Ogre::Vector3(0, 0, 0), Ogre::Vector3(1, 1, 1), Ogre::Quaternion(1, 0, 0, 0));
 
     PointCloud::Point default_pt;
-    default_pt.color = Ogre::ColourValue(1, 1, 1);
+    default_pt.color = Ogre::ColourValue(0, 1, 0);
     default_pt.position = Ogre::Vector3::ZERO;
-    RangeImageTexture::CloudPointsPtr points(new RangeImageTexture::CloudPoints());
-    points->resize(last_msg_->width * last_msg_->height, default_pt);
+    RangeImageTexture::CloudPoints colorized_points(msg->width * msg->height, default_pt);
 
-    color_trans->transform(last_msg_, PointCloudTransformer::Support_Color, transform, *points);
+    color_trans->transform(msg, PointCloudTransformer::Support_Color, tf, colorized_points);
 
-    texture_.addPoints(last_msg_->width, last_msg_->height, points);
-    texture_.flipped(flip_property_->getBool());
+    texture_.setColorForNanPoints(mark_nan_pixels_property_->getBool(), nan_color_property_->getOgreColor());
+    texture_.generateNewImage(msg, colorized_points);
+}
+
+void RangeImageDisplay::resetForFlip()
+{
+    texture_.clear();
+    existing_columns_.clear();
+    render_panel_->getCamera()->setPosition(Ogre::Vector3(999999, 999999, 999999));
 }
 
 } // namespace rviz
