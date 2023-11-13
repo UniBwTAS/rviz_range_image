@@ -66,8 +66,8 @@ RangeImageDisplay::RangeImageDisplay() : Display(), texture_()
                                             SLOT(causeRetransform()),
                                             this);
 
-    enable_streaming_property_ =
-        new BoolProperty("Enable streaming",
+    enable_continuous_property_ =
+        new BoolProperty("Enable continuous",
                          false,
                          "Whether multiple sub-range images (messages) should be accumulated horizontally to display a "
                          "range image. Please choose a criterion for removing old sub-range images.",
@@ -75,11 +75,11 @@ RangeImageDisplay::RangeImageDisplay() : Display(), texture_()
                          SLOT(causeRetransform()),
                          this);
 
-    streaming_max_columns_property_ =
+    continuous_max_columns_property_ =
         new IntProperty("Maximum Columns",
                         0,
                         "Maximum accumulated number of column of all messages. Zero means disabled.",
-                        enable_streaming_property_,
+                        enable_continuous_property_,
                         SLOT(causeRetransform()),
                         this);
 }
@@ -238,10 +238,10 @@ void RangeImageDisplay::update(float wall_dt, float ros_dt)
     Q_UNUSED(ros_dt)
 
     // remove old columns
-    if (enable_streaming_property_->getBool())
+    if (enable_continuous_property_->getBool())
     {
         auto it = existing_columns_.begin();
-        while (existing_columns_.size() > streaming_max_columns_property_->getInt())
+        while (existing_columns_.size() > continuous_max_columns_property_->getInt())
             it = existing_columns_.erase(it);
     }
 
@@ -299,7 +299,7 @@ void RangeImageDisplay::update(float wall_dt, float ros_dt)
 
 void RangeImageDisplay::processMessage(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
-    if (!enable_streaming_property_->getBool())
+    if (!enable_continuous_property_->getBool())
         existing_columns_.clear();
 
     // check if point cloud is valid otherwise ignore it
@@ -335,7 +335,7 @@ void RangeImageDisplay::processMessage(const sensor_msgs::PointCloud2::ConstPtr&
     if (!existing_columns_.empty() && existing_columns_.back()->height != height)
     {
         ROS_ERROR("Error in Range Image Visualization: Height of new message does not match existing range image. "
-                  "Maybe you have to uncheck 'Streaming' or toggle 'Flip' option.");
+                  "Maybe you have to uncheck 'Continuous' or toggle 'Flip' option.");
         return;
     }
     for (int column_index = 0; column_index < width; column_index++)

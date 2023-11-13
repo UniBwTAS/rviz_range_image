@@ -154,8 +154,8 @@ class RangeImageDisplay : public Display
     BoolProperty* keep_aspect_ratio_property_;
     BoolProperty* mark_nan_pixels_property_;
     ColorProperty* nan_color_property_;
-    BoolProperty* enable_streaming_property_;
-    IntProperty* streaming_max_columns_property_;
+    BoolProperty* enable_continuous_property_;
+    IntProperty* continuous_max_columns_property_;
 };
 
 } // namespace rviz
