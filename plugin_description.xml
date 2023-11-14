@@ -1,4 +1,4 @@
-<library path="lib/libvis_range_image">
+<library path="lib/librviz_range_image">
     <class name="rviz/RangeImage"
            type="rviz::RangeImageDisplay"
            base_class_type="rviz::Display">

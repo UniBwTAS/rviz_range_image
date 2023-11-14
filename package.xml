@@ -1,5 +1,5 @@
 <package format="2">
-  <name>vis_range_image</name>
+  <name>rviz_range_image</name>
   <version>0.1.0</version>
   <description>
     Visualizes a PointCloud2 as a range image.
